@@ -1,0 +1,130 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+# Stack completo: Jenkins + SonarQube + PostgreSQL (para uso local en clases)
+#
+# USO:
+#   docker compose up -d          → Levantar todos los servicios
+#   docker compose down           → Detener (conserva datos)
+#   docker compose down -v        → Detener y eliminar datos
+#   docker compose logs -f        → Ver logs en tiempo real
+#
+# ACCESO:
+#   Jenkins:    http://localhost:8080
+#   SonarQube:  http://localhost:9000  (admin / admin al primer inicio)
+#
+# REQUISITOS:
+#   - Docker Desktop instalado
+#   - Al menos 6 GB de RAM disponible
+#   - Puertos 8080 y 9000 libres
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── SONARQUBE ──────────────────────────────────────────────────────────────
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonarqube
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
+      # Aumentar heap para proyectos más grandes
+      SONAR_WEB_JAVAOPTS: "-Xmx512m -Xms128m"
+      SONAR_CE_JAVAOPTS: "-Xmx512m -Xms128m"
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    networks:
+      - cicd-network
+    # SonarQube requiere este ajuste del kernel del host
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+
+  # ── BASE DE DATOS DE SONARQUBE ─────────────────────────────────────────────
+  sonar-db:
+    image: postgres:15-alpine
+    container_name: sonar-db
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonarqube
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+    networks:
+      - cicd-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── JENKINS ────────────────────────────────────────────────────────────────
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: jenkins
+    user: root
+    ports:
+      - "8080:8080"
+      - "50000:50000"  # Puerto para Jenkins agents
+    environment:
+      # Omite el wizard de configuración inicial (para demos rápidas)
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      # Montar Docker socket para que Jenkins pueda ejecutar contenedores
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Instalar Docker CLI dentro del contenedor Jenkins
+      - jenkins_docker_certs:/certs/client:ro
+      # Montar configuración inicial de Jenkins
+      - ./jenkins/init.groovy.d:/var/jenkins_home/init.groovy.d:ro
+    networks:
+      - cicd-network
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/login || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+# ── VOLÚMENES PERSISTENTES ────────────────────────────────────────────────────
+volumes:
+  sonarqube_data:
+    driver: local
+  sonarqube_extensions:
+    driver: local
+  sonarqube_logs:
+    driver: local
+  postgresql_data:
+    driver: local
+  jenkins_home:
+    driver: local
+  jenkins_docker_certs:
+    driver: local
+
+# ── RED INTERNA ───────────────────────────────────────────────────────────────
+networks:
+  cicd-network:
+    driver: bridge
+    name: cicd-network
